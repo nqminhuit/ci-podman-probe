@@ -46,13 +46,8 @@ jobs:
             caddy validate --config /tmp/Caddyfile --adapter caddyfile
 
       - name: syslog-ng syntax check (the deploy_containers.yaml command)
+        # The real syslog-ng.conf from nuc14ess, which is what that step checks.
         run: |
-          cat > syslog-ng.conf <<'EOF'
-          @version: 4.12
-          source s_local { local(); };
-          destination d_stdout { file("/dev/stdout"); };
-          log { source(s_local); destination(d_stdout); };
-          EOF
           podman run --rm \
             --volume "$PWD/syslog-ng.conf:/tmp/syslog-ng.conf:ro" \
             --entrypoint /usr/sbin/syslog-ng \
