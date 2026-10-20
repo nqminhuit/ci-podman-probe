@@ -1,0 +1,78 @@
+name: Podman probe
+
+# Disposable: verifies that the container commands nuc14ess's workflows use
+# work under rootless podman on the GitHub-hosted runner image, on both the
+# image ubuntu-latest resolves to now and the one it is migrating to.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show versions
+        run: |
+          podman --version
+          echo "unqualified-search-registries:"
+          grep -r . /etc/containers/registries.conf 2>/dev/null | grep -i unqualified || echo "  (not set)"
+
+      - name: Caddyfile validate (unqualified image name)
+        # The exact command from projdash.yaml / reload_caddy.yaml.
+        run: |
+          cat > Caddyfile <<'EOF'
+          {
+            admin off
+          }
+          :8080 {
+            respond "ok"
+          }
+          EOF
+          podman run --rm -v "$PWD/Caddyfile:/tmp/Caddyfile:ro" caddy:2-alpine \
+            caddy validate --config /tmp/Caddyfile --adapter caddyfile
+
+      - name: Caddyfile validate (fully qualified image name)
+        run: |
+          podman run --rm -v "$PWD/Caddyfile:/tmp/Caddyfile:ro" docker.io/library/caddy:2-alpine \
+            caddy validate --config /tmp/Caddyfile --adapter caddyfile
+
+      - name: syslog-ng syntax check (the deploy_containers.yaml command)
+        run: |
+          cat > syslog-ng.conf <<'EOF'
+          @version: 4.12
+          source s_local { local(); };
+          destination d_stdout { file("/dev/stdout"); };
+          log { source(s_local); destination(d_stdout); };
+          EOF
+          podman run --rm \
+            --volume "$PWD/syslog-ng.conf:/tmp/syslog-ng.conf:ro" \
+            --entrypoint /usr/sbin/syslog-ng \
+            docker.io/balabit/syslog-ng:4.12.0 \
+            --syntax-only --cfgfile /tmp/syslog-ng.conf
+
+      - name: Caddy with --network host (the projdash proxy test's shape)
+        # The proxy fixture test runs Caddy with --network host and publishes
+        # nothing; this is the case where the two engines differ most.
+        run: |
+          set -euo pipefail
+          cat > Caddyfile.json <<'EOF'
+          {"admin":{"listen":"127.0.0.1:2019"},"apps":{"http":{"servers":{"srv0":{"listen":[":18080"],"routes":[{"handle":[{"handler":"static_response","body":"ok"}]}]}}}}}
+          EOF
+          podman run -d --name probe-caddy --network host \
+            -v "$PWD/Caddyfile.json:/etc/caddy/config.json:ro" \
+            docker.io/library/caddy:2-alpine caddy run --config /etc/caddy/config.json
+          for i in $(seq 1 40); do
+            curl -fsS --max-time 1 http://127.0.0.1:18080/ -o /dev/null 2>/dev/null && break || true
+            sleep 0.5
+          done
+          curl -fsS --max-time 5 http://127.0.0.1:18080/ | grep -q ok && echo "host-network Caddy served ok"
+          podman rm -f probe-caddy
